@@ -1,0 +1,15 @@
+[package]
+name = "phi-wire-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider wire protocol for the phi family: versioned requests, replies, and errors"
+readme = "README.md"
+keywords = ["protocol", "wire", "agent", "json-lines"]
+categories = ["network-programming"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

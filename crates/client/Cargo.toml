@@ -1,0 +1,18 @@
+[package]
+name = "phi-wire-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Correlated JSON-lines subprocess transport for the phi family: cancellation never replays a request"
+readme = "README.md"
+keywords = ["transport", "ipc", "agent", "subprocess"]
+categories = ["network-programming"]
+
+[dependencies]
+serde_json.workspace = true
+phi-wire-protocol.workspace = true
+phi-wire-adapter.workspace = true
+tokio.workspace = true
+serde.workspace = true

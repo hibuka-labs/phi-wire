@@ -1,0 +1,20 @@
+phi-wire
+Copyright 2026 hibuka-labs
+
+This product includes software developed at Tongyi-MAI (https://github.com/Tongyi-MAI/OpenGCUA),
+specifically the `mu-protocol`, `mu-adapter`, and `mu-client` crates from the
+OpenGCUA SDK (packages/sdk/crates). Licensed under the Apache License 2.0.
+
+Upstream project: https://github.com/Tongyi-MAI/OpenGCUA
+Copyright (c) Tongyi-MAI and the OpenGCUA contributors.
+
+Changes from upstream (the "fork"):
+  * The crates were renamed `mu-*` -> `phi-wire-*` so they can be published to
+    crates.io under the hibuka-labs namespace.
+  * `mu-protocol`'s embedded Playwright contract
+    (`api/contract/playwright-v1.json`) was moved into the crate directory
+    (`crates/protocol/contract/`) and the `include_str!` path rewritten, so
+    the crate packages on its own.
+  * Packaging metadata only. No protocol or transport logic was changed.
+
+This fork is maintained by hibuka-labs and is not endorsed by Tongyi-MAI.

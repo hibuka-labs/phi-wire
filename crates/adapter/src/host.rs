@@ -217,7 +217,7 @@ pub async fn shell(q: &Value) -> Result<Value, Error> {
     }
     let mut child = command.spawn().map_err(io_error)?;
     let pid = child.id().unwrap();
-    let _group = ProcessGroup(pid);
+    let _group = ProcessGroup::new(pid);
     let out = tokio::spawn(drain(child.stdout.take().unwrap(), cap));
     let err = tokio::spawn(drain(child.stderr.take().unwrap(), cap));
     let mut stdin = child.stdin.take().unwrap();
@@ -258,13 +258,81 @@ pub async fn shell(q: &Value) -> Result<Value, Error> {
     )
 }
 
+/// Kills the child and the processes it started when this guard drops.
+///
+/// A timed-out or finished command can leave descendants behind: the direct
+/// child is waited for, but anything it spawned keeps running. On unix the
+/// child leads its own process group (see `process_group(0)` above), so a
+/// negative pid signals the whole group.
+///
+/// Windows has no process groups. A job object with `KILL_ON_JOB_CLOSE`
+/// holds the tree instead: closing the last handle terminates every process
+/// still assigned to it, descendants included. This beats `taskkill /T`,
+/// which needs a second process spawn and can hit a reused pid.
+#[cfg(unix)]
 struct ProcessGroup(u32);
+
+#[cfg(unix)]
+impl ProcessGroup {
+    fn new(pid: u32) -> Self {
+        Self(pid)
+    }
+}
+
+#[cfg(unix)]
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
-        #[cfg(unix)]
         unsafe {
             libc::kill(-(self.0 as i32), libc::SIGKILL);
         }
+    }
+}
+
+#[cfg(windows)]
+struct ProcessGroup(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl ProcessGroup {
+    fn new(pid: u32) -> Self {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return Self(job);
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            if !process.is_null() {
+                // A child already inside a job is still adopted: Windows 8 and
+                // later nest jobs. If the assignment is refused, nothing is
+                // tracked and the guard degrades to closing an empty job.
+                AssignProcessToJobObject(job, process);
+                CloseHandle(process);
+            }
+            Self(job)
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
     }
 }
 #[cfg(test)]
@@ -295,6 +363,37 @@ mod tests {
             "FILE_TOO_LARGE"
         );
     }
+    /// A descendant that outlives the shell must die when the guard drops.
+    ///
+    /// The probe detaches (`start /b`) a PowerShell that writes a marker four
+    /// seconds later, with its own output going nowhere so it cannot hold the
+    /// drains open — otherwise `shell` legitimately waits for it. A kill that
+    /// reaches only the direct child leaves the file behind.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_guard_kills_the_descendant_tree() {
+        let marker = std::env::temp_dir().join(format!("phi-wire-tree-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let cmd = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+        let inner = format!(
+            "Start-Sleep -Seconds 4; Set-Content -Path '{}' -Value survived",
+            marker.display()
+        );
+        let mut child = tokio::process::Command::new(&cmd)
+            .args(["/c", &format!("start /b powershell -NoProfile -Command \"{inner}\"")])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let group = ProcessGroup::new(child.id().unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        drop(group);
+        let _ = child.wait().await;
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert!(!marker.exists(), "a descendant survived the job close");
+    }
+
     #[tokio::test]
     async fn process_output_drains_beyond_limit_and_timeout_kills_group() {
         let q = json!({"argv":["/bin/sh","-c","printf 123456789; printf error >&2"],"max_output_bytes":3,"timeout_ms":2000});

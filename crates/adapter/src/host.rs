@@ -24,12 +24,25 @@ fn io_error(e: std::io::Error) -> Error {
         e.to_string(),
     )
 }
+/// The host path a request names, if it names one at all.
+///
+/// A path must be **absolute on the platform that will act on it**: the
+/// adapter hands the path straight to the filesystem, so a relative path
+/// would resolve against whatever the process's current directory happens to
+/// be. The check used to be `starts_with('/')`, which is the Unix spelling
+/// only — on Windows every path (`C:\work\file`) was refused with
+/// "use an absolute host path", so the whole file surface was dead there.
+/// `Path::is_absolute` is the platform's own answer to that question.
 fn path(q: &Value, key: &str) -> Result<PathBuf, Error> {
-    let p = q[key]
+    let raw = q[key]
         .as_str()
-        .filter(|p| p.starts_with('/') && !p.contains('\0'))
+        .filter(|p| !p.contains('\0'))
         .ok_or_else(|| Error::new("INVALID_ARGUMENT", "use an absolute host path"))?;
-    Ok(PathBuf::from(p))
+    let p = PathBuf::from(raw);
+    if !p.is_absolute() {
+        return Err(Error::new("INVALID_ARGUMENT", "use an absolute host path"));
+    }
+    Ok(p)
 }
 fn info(path: &Path) -> Result<Value, Error> {
     let m = path.symlink_metadata().map_err(io_error)?;
@@ -173,9 +186,17 @@ pub async fn shell(q: &Value) -> Result<Value, Error> {
             })
             .collect::<Result<_, _>>()?
     } else {
+        // The default shell is the platform's own: `sh` on Unix, `cmd` on
+        // Windows. `/bin/sh` is not a path Windows has, so naming it there
+        // made every script request fail to spawn.
+        let (shell, flag) = if cfg!(windows) {
+            ("cmd", "/C")
+        } else {
+            ("/bin/sh", "-c")
+        };
         vec![
-            "/bin/sh".into(),
-            "-c".into(),
+            shell.into(),
+            flag.into(),
             q["script"]
                 .as_str()
                 .ok_or_else(|| Error::new("INVALID_ARGUMENT", "script or argv required"))?
@@ -186,7 +207,10 @@ pub async fn shell(q: &Value) -> Result<Value, Error> {
         return Err(Error::new("INVALID_ARGUMENT", "invalid argv"));
     }
     let mut command = Command::new(&argv[0]);
-    command.current_dir("/");
+    // The working directory defaults to the platform root: `/` on Unix,
+    // `C:\` on Windows. The literal `/` is not a directory Windows has, so
+    // every spawned command failed to start.
+    command.current_dir(if cfg!(windows) { "C:\\" } else { "/" });
     command
         .args(&argv[1..])
         .stdin(Stdio::piped())
@@ -380,7 +404,10 @@ mod tests {
             marker.display()
         );
         let mut child = tokio::process::Command::new(&cmd)
-            .args(["/c", &format!("start /b powershell -NoProfile -Command \"{inner}\"")])
+            .args([
+                "/c",
+                &format!("start /b powershell -NoProfile -Command \"{inner}\""),
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -396,16 +423,35 @@ mod tests {
 
     #[tokio::test]
     async fn process_output_drains_beyond_limit_and_timeout_kills_group() {
-        let q = json!({"argv":["/bin/sh","-c","printf 123456789; printf error >&2"],"max_output_bytes":3,"timeout_ms":2000});
+        // The command is spelled per platform: `sh` with `printf` on Unix,
+        // `cmd` with `echo` on Windows. The property under test is the same
+        // on both — the output is capped, the stream is marked truncated, and
+        // a run that outlasts its timeout is killed rather than left running.
+        let (argv, expected) = if cfg!(windows) {
+            (vec!["cmd", "/C", "echo 123456789 & echo error 1>&2"], "123")
+        } else {
+            (
+                vec!["/bin/sh", "-c", "printf 123456789; printf error >&2"],
+                "123",
+            )
+        };
+        let q = json!({"argv":argv,"max_output_bytes":3,"timeout_ms":2000});
         let r = shell(&q).await.unwrap();
         assert_eq!(
             STANDARD.decode(r["stdout"].as_str().unwrap()).unwrap(),
-            b"123"
+            expected.as_bytes()
         );
         assert_eq!(r["stdout_truncated"], true);
         assert_eq!(r["stderr_truncated"], true);
         assert_eq!(r["exit_code"], 0);
-        let r = shell(&json!({"argv":["/bin/sh","-c","sleep 60 & wait"],"timeout_ms":400}))
+
+        // The timeout case: a command that would outlast its budget.
+        let (argv, timeout) = if cfg!(windows) {
+            (vec!["cmd", "/C", "ping -n 60 127.0.0.1 > nul"], 400)
+        } else {
+            (vec!["/bin/sh", "-c", "sleep 60 & wait"], 400)
+        };
+        let r = shell(&json!({"argv":argv,"timeout_ms":timeout}))
             .await
             .unwrap();
         assert_eq!(r["state"], "timed_out");

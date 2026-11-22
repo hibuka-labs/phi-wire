@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The client transport tests run on Windows again.** The three transport
+  tests named `/bin/sh`, a path Windows does not have, so they failed there
+  with `SETUP_REQUIRED` before they could test the transport at all. They
+  now spawn the platform's own shell — `cmd /C` on Windows, `/bin/sh -c` on
+  Unix — and assert the exit status the way the platform spells it
+  ("exit code: 3" on Windows, "exit status: 3" on Unix).
+- **The adapter's default shell is held by a test.** The default shell used
+  to be `/bin/sh` on every platform; it is now the platform's own (`cmd /C`
+  on Windows), and a test pins that so it cannot regress.
+
 ## [0.1.0] - 2026-10-31
 
 ### Added

@@ -393,6 +393,38 @@ impl Provider for ProcessClient {
 mod tests {
     use super::*;
 
+    /// The shell that runs one script, and the arguments that run it.
+    ///
+    /// `/bin/sh` is not a path Windows has: a test that named it could not
+    /// spawn there and failed with SETUP_REQUIRED before it tested the
+    /// transport at all. `cmd /C` is Windows' spelling of `sh -c` — the same
+    /// shell the adapter's default shell uses (`crates/adapter/src/host.rs`),
+    /// so the test exercises what ships. The scripts differ because the two
+    /// shells spell the same thing differently.
+    ///
+    /// `set /p` is Windows' `read`: it takes one line from stdin. Its
+    /// prompt goes to stdout, which is the protocol stream, so it is
+    /// redirected to the null device — stdout must carry nothing but the
+    /// provider's frames.
+    fn shell_command(unix: &str, windows: &str) -> (String, Vec<String>) {
+        if cfg!(windows) {
+            ("cmd".into(), vec!["/C".into(), windows.into()])
+        } else {
+            ("/bin/sh".into(), vec!["-c".into(), unix.into()])
+        }
+    }
+
+    /// How the platform spells an exit status in `ExitStatus::to_string()`.
+    ///
+    /// Unix prints "exit status: 3"; Windows prints "exit code: 3".
+    fn exit_status_text(code: i32) -> String {
+        if cfg!(windows) {
+            format!("exit code: {code}")
+        } else {
+            format!("exit status: {code}")
+        }
+    }
+
     #[tokio::test]
     async fn missing_node_executable_reports_setup_required() {
         let result = ProcessClient::spawn(
@@ -412,19 +444,18 @@ mod tests {
 
     #[tokio::test]
     async fn exited_provider_reports_status_and_stderr() {
-        let client = ProcessClient::spawn(
-            "/bin/sh",
-            &["-c".into(), "echo chrome-crashed >&2; exit 3".into()],
-            &BTreeMap::new(),
-        )
-        .unwrap();
+        let (program, args) = shell_command(
+            "echo chrome-crashed >&2; exit 3",
+            "echo chrome-crashed 1>&2 & exit /b 3",
+        );
+        let client = ProcessClient::spawn(&program, &args, &BTreeMap::new()).unwrap();
         client.wait().await;
         let request: Request =
             serde_json::from_value(serde_json::json!({"op":"describe","timeout_ms":1000})).unwrap();
         let error = client.send(request).await.unwrap_err();
         assert_eq!(error.code, "DEVICE_OFFLINE");
         assert!(
-            error.message.contains("exit status: 3"),
+            error.message.contains(&exit_status_text(3)),
             "{}",
             error.message
         );
@@ -441,32 +472,33 @@ mod tests {
 
     #[tokio::test]
     async fn host_shutdown_records_real_exit_status() {
-        let client = ProcessClient::spawn(
-            "/bin/sh",
-            &["-c".into(), "read line; echo clean-stop >&2; exit 0".into()],
-            &BTreeMap::new(),
-        )
-        .unwrap();
+        // The provider stays alive until the transport closes its stdin:
+        // `read` on Unix, `set /p` on Windows. Shutting the provider down is
+        // then what ends it, which is the point of the test.
+        let (program, args) = shell_command(
+            "read line; echo clean-stop >&2; exit 0",
+            "set /p line= 1>nul & echo clean-stop 1>&2 & exit /b 0",
+        );
+        let client = ProcessClient::spawn(&program, &args, &BTreeMap::new()).unwrap();
         tokio::time::timeout(Duration::from_secs(3), client.shutdown())
             .await
             .unwrap()
             .unwrap();
         let reason = client.exit_reason().unwrap();
-        assert!(reason.contains("exit status: 0"), "{reason}");
+        assert!(reason.contains(&exit_status_text(0)), "{reason}");
         assert!(reason.contains("clean-stop"), "{reason}");
     }
 
     #[tokio::test]
     async fn malformed_reply_is_protocol_error_not_device_offline() {
-        let client = ProcessClient::spawn(
-            "/bin/sh",
-            &[
-                "-c".into(),
-                "read line; printf 'not-json\\n'; exit 0".into(),
-            ],
-            &BTreeMap::new(),
-        )
-        .unwrap();
+        // The provider reads the request before it answers, so it cannot
+        // exit before the request reaches it: `read` on Unix, `set /p` on
+        // Windows.
+        let (program, args) = shell_command(
+            "read line; printf 'not-json\\n'; exit 0",
+            "set /p line= 1>nul & echo not-json & exit /b 0",
+        );
+        let client = ProcessClient::spawn(&program, &args, &BTreeMap::new()).unwrap();
         let request: Request =
             serde_json::from_value(serde_json::json!({"op":"describe","timeout_ms":1000})).unwrap();
         let error = client.send(request).await.unwrap_err();

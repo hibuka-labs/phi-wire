@@ -421,6 +421,36 @@ mod tests {
         assert!(!marker.exists(), "a descendant survived the job close");
     }
 
+    /// The default shell is the platform's own: `sh` on Unix, `cmd` on Windows.
+    ///
+    /// The default used to be `/bin/sh` everywhere, a path Windows does not
+    /// have, so every script request there failed to spawn with
+    /// SETUP_REQUIRED. Naming the shell per platform is what makes the
+    /// default usable at all, so it is pinned here rather than left to the
+    /// reading of the code.
+    ///
+    /// The script is spelled per platform too. `cmd /C` strips the quotes
+    /// around its command only when the command holds a special character,
+    /// and `&` is what makes it — the same shape the sibling test below
+    /// uses, which is known to run on Windows. `sh` reads `&` as "run this
+    /// in the background", so Unix keeps the plain form.
+    #[tokio::test]
+    async fn the_default_shell_is_the_platforms_own() {
+        let script = if cfg!(windows) {
+            "echo phi-wire & echo done"
+        } else {
+            "echo phi-wire"
+        };
+        let r = shell(&json!({"script":script})).await.unwrap();
+        assert_eq!(r["state"], "exited");
+        assert_eq!(r["exit_code"], 0);
+        let stdout = STANDARD.decode(r["stdout"].as_str().unwrap()).unwrap();
+        assert!(
+            String::from_utf8_lossy(&stdout).contains("phi-wire"),
+            "{stdout:?}"
+        );
+    }
+
     #[tokio::test]
     async fn process_output_drains_beyond_limit_and_timeout_kills_group() {
         // The command is spelled per platform: `sh` with `printf` on Unix,

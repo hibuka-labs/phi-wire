@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-27
+
+### Fixed
+- **A host path and the default shell are platform-shaped.** The adapter
+  assumed Unix path and shell conventions; on Windows the host path and the
+  default shell now come out in the platform's own shape.
+- **Windows kills the whole process tree.** Stopping a spawned process used to
+  stop the top process only, leaving children alive; the adapter now terminates
+  the tree.
+- **Transport tests spawn the platform's own shell.** The tests hard-coded a
+  Unix shell, so they could not run where that shell is absent.
+- **Dual-licensed as MIT OR Apache-2.0.** The crate's license field now carries
+  both, matching the rest of the family.
+- **CI runs on every release platform.** Linux, macOS and Windows all build and
+  test; a platform-primitive gate rejects hand-rolled `HOME` lookups.
+
 ### Fixed
 - **The client transport tests run on Windows again.** The three transport
   tests named `/bin/sh`, a path Windows does not have, so they failed there
